@@ -1,19 +1,16 @@
-require('dotenv').config();
-
 const { Client, GatewayIntentBits, ChannelType } = require('discord.js');
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
+require('dotenv').config();
 
-const TOKEN = process.env.USER_TOKEN;
+const TOKEN = process.env.USER_TOKEN?.trim();
 
-console.log('🔍 DEBUG: USER_TOKEN presente?', !!TOKEN);
-console.log('🔍 DEBUG: Token length:', TOKEN ? TOKEN.length : 'N/A');
-console.log('🔍 DEBUG: Variabili disponibili:', Object.keys(process.env).filter(k => k.includes('USER') || k.includes('TOKEN')));
+console.log('🔍 Token ricevuto:', !!TOKEN);
+console.log('🔍 Lunghezza token:', TOKEN?.length);
 
-if (!TOKEN) {
-  console.error('❌ Errore: USER_TOKEN non configurato!');
-  console.error('❌ Aggiungi USER_TOKEN nelle variabili d\'ambiente di Render');
+if (!TOKEN || TOKEN.length < 50) {
+  console.error('❌ TOKEN non valido!');
   process.exit(1);
 }
 
@@ -22,12 +19,10 @@ const client = new Client({
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
-    GatewayIntentBits.DirectMessages,
-    GatewayIntentBits.GuildMembers
+    GatewayIntentBits.DirectMessages
   ]
 });
 
-// Configurazione hardcoded
 const CONFIG = {
   SOURCE_GUILD_ID: '1430987988606779455',
   CHANNEL_IDS: [
@@ -35,53 +30,46 @@ const CONFIG = {
     '1431350918267404501',
     '1431350851259072714'
   ],
-  TARGET_GUILD_ID: process.env.TARGET_GUILD_ID || null
+  TARGET_GUILD_ID: process.env.TARGET_GUILD_ID?.trim()
 };
 
 let tempDir = './temp_media';
 
-// Assicurati che esista la cartella temp
 if (!fs.existsSync(tempDir)) {
   fs.mkdirSync(tempDir, { recursive: true });
 }
 
 client.once('ready', async () => {
-  console.log(`✅ Account connesso come ${client.user.tag}`);
-  console.log('⚠️  USO A TUO RISCHIO - Viola i ToS di Discord!\n');
-  console.log('🚀 Inizio processo di clonazione automatico...\n');
+  console.log(`\n✅ CONNESSO: ${client.user.username}#${client.user.discriminator}`);
+  console.log('⚠️  Usando account user - Viola ToS di Discord!\n');
+  console.log('🚀 Inizio clonazione...\n');
 
   try {
-    await startAutoCloning();
+    await startCloning();
   } catch (error) {
-    console.error('❌ Errore nel processo di clonazione:', error);
+    console.error('❌ Errore:', error.message);
     process.exit(1);
   }
 });
 
-/**
- * Processo automatico di clonazione
- */
-async function startAutoCloning() {
+client.on('error', error => {
+  console.error('❌ Errore client:', error);
+});
+
+client.on('shardError', error => {
+  console.error('❌ Errore shard:', error);
+});
+
+async function startCloning() {
   try {
-    // Step 1: Fetch guild e canali
-    console.log('📡 Step 1: Caricamento guild e canali...');
+    console.log('📡 Caricamento guild...');
     const sourceGuild = await client.guilds.fetch(CONFIG.SOURCE_GUILD_ID);
-    
-    if (!CONFIG.TARGET_GUILD_ID) {
-      console.error('❌ TARGET_GUILD_ID non configurato nelle variabili d\'ambiente!');
-      process.exit(1);
-    }
-    
     const targetGuild = await client.guilds.fetch(CONFIG.TARGET_GUILD_ID);
 
-    console.log(`✓ Guild source: ${sourceGuild.name}`);
-    console.log(`✓ Guild target: ${targetGuild.name}\n`);
+    console.log(`✓ Source: ${sourceGuild.name}`);
+    console.log(`✓ Target: ${targetGuild.name}\n`);
 
-    // Step 2: Clona canali
-    console.log('🔄 Step 2: Clonazione canali...');
-    const channelMapping = {};
-
-    // Clona tutti i canali in parallelo
+    console.log('🔄 Clonazione canali...');
     const cloneTasks = CONFIG.CHANNEL_IDS.map(async (channelId) => {
       try {
         const sourceChannel = sourceGuild.channels.cache.get(channelId);
@@ -91,16 +79,13 @@ async function startAutoCloning() {
         }
 
         const newName = `GRINDR_${sourceChannel.name}`;
-        
-        let newChannel = await targetGuild.channels.create({
+        const newChannel = await targetGuild.channels.create({
           name: newName,
           type: ChannelType.GuildText,
           topic: sourceChannel.topic || '',
-          nsfw: sourceChannel.nsfw,
-          rateLimitPerUser: sourceChannel.rateLimitPerUser || 0
+          nsfw: sourceChannel.nsfw
         });
 
-        // Copia permessi
         try {
           for (const [targetId, overwrite] of sourceChannel.permissionOverwrites.cache) {
             await newChannel.permissionOverwrites.create(targetId, {
@@ -108,190 +93,145 @@ async function startAutoCloning() {
               deny: overwrite.deny
             });
           }
-        } catch (err) {
+        } catch (e) {
           console.log(`⚠️ Permessi non copiati per ${newName}`);
         }
 
-        channelMapping[channelId] = newChannel;
-        console.log(`✓ Canale clonato: ${newName}`);
-
+        console.log(`✓ Clonato: ${newName}`);
         return { sourceChannel, newChannel };
-
       } catch (error) {
-        console.error(`✗ Errore clonazione canale ${channelId}:`, error.message);
+        console.error(`✗ Errore canale ${channelId}:`, error.message);
         return null;
       }
     });
 
-    const cloneResults = await Promise.all(cloneTasks);
-    console.log(`\n✅ Canali clonati: ${cloneResults.filter(r => r !== null).length}/${CONFIG.CHANNEL_IDS.length}\n`);
+    const results = await Promise.all(cloneTasks);
+    const cloned = results.filter(r => r !== null);
+    console.log(`\n✅ Canali clonati: ${cloned.length}/${CONFIG.CHANNEL_IDS.length}\n`);
 
-    // Step 3: Download media e upload diretto
-    console.log('📥 Step 3: Scaricamento e upload media...');
-    
-    for (const result of cloneResults) {
+    console.log('📥 Scaricamento media...');
+    for (const result of cloned) {
       if (!result) continue;
-
       const { sourceChannel, newChannel } = result;
-
-      console.log(`\n📤 Elaborazione canale: ${sourceChannel.name}`);
-      await downloadAndUploadMediaDirect(sourceChannel, newChannel);
+      console.log(`\n📤 Elaborazione: ${sourceChannel.name}`);
+      await downloadAndUpload(sourceChannel, newChannel);
     }
 
-    console.log('\n✅ Processo completato con successo!');
-    console.log('🎉 Tutti i canali sono stati clonati e riempiti di contenuto');
-
-    // Pulizia
-    cleanupTempDir();
+    console.log('\n✅ COMPLETATO!');
+    cleanupTemp();
     process.exit(0);
 
   } catch (error) {
     console.error('❌ Errore fatale:', error);
-    cleanupTempDir();
+    cleanupTemp();
     process.exit(1);
   }
 }
 
-/**
- * Scarica media e li invia direttamente al canale
- */
-async function downloadAndUploadMediaDirect(sourceChannel, targetChannel) {
+async function downloadAndUpload(sourceChannel, targetChannel) {
   try {
-    let messageCount = 0;
+    let msgCount = 0;
     let mediaCount = 0;
-    let lastMessageId = null;
+    let lastId = null;
 
     while (true) {
-      const options = { limit: 100 };
-      if (lastMessageId) options.before = lastMessageId;
+      const opts = { limit: 100 };
+      if (lastId) opts.before = lastId;
 
-      const messages = await sourceChannel.messages.fetch(options);
+      const msgs = await sourceChannel.messages.fetch(opts);
+      if (msgs.size === 0) break;
 
-      if (messages.size === 0) break;
+      msgCount += msgs.size;
 
-      messageCount += messages.size;
+      for (const [, msg] of msgs) {
+        const tasks = [];
 
-      for (const [, message] of messages) {
-        const uploadTasks = [];
-
-        // Processa attachments
-        for (const [, attachment] of message.attachments) {
-          if (isMediaFile(attachment.name)) {
-            uploadTasks.push(
-              downloadAndUploadFileDirect(
-                attachment.url,
-                attachment.name,
-                targetChannel,
-                message.author.username
-              )
+        for (const [, att] of msg.attachments) {
+          if (isMedia(att.name)) {
+            tasks.push(
+              uploadFile(att.url, att.name, targetChannel, msg.author.username)
                 .then(() => mediaCount++)
-                .catch(err => console.error(`✗ Errore upload: ${err.message}`))
+                .catch(e => console.error(`✗ ${e.message}`))
             );
           }
         }
 
-        // Processa embed images
-        for (const embed of message.embeds) {
-          if (embed.image?.url) {
-            uploadTasks.push(
-              downloadAndUploadFileDirect(
-                embed.image.url,
-                `embed_${Date.now()}.png`,
-                targetChannel,
-                message.author.username
-              )
+        for (const emb of msg.embeds) {
+          if (emb.image?.url) {
+            tasks.push(
+              uploadFile(emb.image.url, `embed_${Date.now()}.png`, targetChannel, msg.author.username)
                 .then(() => mediaCount++)
-                .catch(err => console.error(`✗ Errore upload: ${err.message}`))
+                .catch(e => console.error(`✗ ${e.message}`))
             );
           }
         }
 
-        if (uploadTasks.length > 0) {
-          console.log(`   ⬇️ Trovati ${uploadTasks.length} media...`);
-          await Promise.all(uploadTasks);
+        if (tasks.length > 0) {
+          console.log(`⬇️ ${tasks.length} media`);
+          await Promise.all(tasks);
         }
       }
 
-      lastMessageId = messages.last().id;
-      console.log(`   ✓ Elaborati ${messages.size} messaggi`);
-
-      await delay(1500); // Delay per evitare rate limit
+      lastId = msgs.last().id;
+      console.log(`✓ ${msgs.size} messaggi`);
+      await delay(1500);
     }
 
-    console.log(`   📊 Totale: ${messageCount} messaggi, ${mediaCount} media uploadati`);
-
+    console.log(`📊 ${msgCount} msg, ${mediaCount} media`);
   } catch (error) {
-    console.error(`Errore durante download/upload: ${error.message}`);
+    console.error(`Errore download:`, error.message);
   }
 }
 
-/**
- * Scarica e invia file direttamente al canale
- */
-async function downloadAndUploadFileDirect(fileUrl, filename, targetChannel, authorName) {
+async function uploadFile(url, filename, channel, author) {
   try {
-    const newFilename = `GRINDR_${authorName}_${filename}`;
-    const filepath = path.join(tempDir, newFilename);
+    const name = `GRINDR_${author}_${filename}`;
+    const filepath = path.join(tempDir, name);
 
-    // Scarica il file
-    const response = await axios.get(fileUrl, { responseType: 'arraybuffer', timeout: 30000 });
-    fs.writeFileSync(filepath, response.data);
+    const res = await axios.get(url, { responseType: 'arraybuffer', timeout: 30000 });
+    fs.writeFileSync(filepath, res.data);
 
-    // Invia il file
     try {
-      await targetChannel.send({
-        files: [filepath]
-      });
+      await channel.send({ files: [filepath] });
     } catch (err) {
-      // Se il file è troppo grande, prova con un semplice link
       if (err.message.includes('too large')) {
-        await targetChannel.send(`**${newFilename}**\n${fileUrl}`);
+        await channel.send(`**${name}**\n${url}`);
       } else {
         throw err;
       }
     }
 
-    // Elimina file temporaneo
     fs.unlinkSync(filepath);
-
     process.stdout.write('.');
-
   } catch (error) {
-    throw new Error(`Errore invio diretto ${filename}: ${error.message}`);
+    throw new Error(`Upload ${filename}: ${error.message}`);
   }
 }
 
-/**
- * Controlla se il file è media
- */
-function isMediaFile(filename) {
-  const mediaExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.mp4', '.webm', '.mov', '.mkv', '.avi'];
-  return mediaExtensions.some(ext => filename.toLowerCase().endsWith(ext));
+function isMedia(filename) {
+  const ext = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.mp4', '.webm', '.mov', '.mkv', '.avi'];
+  return ext.some(e => filename.toLowerCase().endsWith(e));
 }
 
-/**
- * Delay helper
- */
 function delay(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
+  return new Promise(r => setTimeout(r, ms));
 }
 
-/**
- * Pulizia directory temporanea
- */
-function cleanupTempDir() {
+function cleanupTemp() {
   try {
     if (fs.existsSync(tempDir)) {
       const files = fs.readdirSync(tempDir);
-      for (const file of files) {
-        fs.unlinkSync(path.join(tempDir, file));
-      }
+      files.forEach(f => fs.unlinkSync(path.join(tempDir, f)));
       fs.rmdirSync(tempDir);
-      console.log('✓ Directory temporanea pulita');
+      console.log('✓ Pulizia completata');
     }
-  } catch (error) {
-    console.error('Errore durante cleanup:', error.message);
+  } catch (e) {
+    console.error('Errore cleanup:', e.message);
   }
 }
 
-client.login(TOKEN);
+console.log('🔐 Accesso...');
+client.login(TOKEN).catch(err => {
+  console.error('❌ Login fallito:', err.message);
+  process.exit(1);
+});
