@@ -33,7 +33,16 @@ server.listen(PORT, () => {
     console.log(`✅ Keep-alive server on port ${PORT}`);
 });
 
-const client = new Client({ checkUpdate: false });
+const client = new Client({ 
+    checkUpdate: false,
+    ws: {
+        properties: {
+            os: 'Linux',
+            browser: 'Discord Client',
+            device: 'Desktop'
+        }
+    }
+});
 
 let isCloning = false;
 let createdChannels = [];
