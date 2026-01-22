@@ -69,7 +69,6 @@ async function downloadAttachment(url) {
         const response = await axios.get(url, {
             responseType: 'arraybuffer',
             headers: {
-                'Authorization': CONFIG.USER_TOKEN,
                 'User-Agent': 'Mozilla/5.0'
             }
         });
@@ -136,6 +135,7 @@ async function fetchChannelMessages(channelId) {
         console.log(`📨 Fetching messaggi da #${channel.name}...`);
         let allMessages = [];
         let lastId = null;
+        let batchCount = 0;
         
         while (true) {
             try {
@@ -145,35 +145,43 @@ async function fetchChannelMessages(channelId) {
                 const messages = await channel.messages.fetch(options);
                 if (messages.size === 0) break;
                 
-                allMessages = [...allMessages, ...Array.from(messages.values())];
+                const messagesArray = Array.from(messages.values());
+                allMessages = allMessages.concat(messagesArray);
                 lastId = messages.last().id;
                 
-                console.log(`   Batch: ${messages.size} messaggi (totale: ${allMessages.length})`);
+                batchCount++;
+                console.log(`   Batch ${batchCount}: ${messages.size} messaggi (totale: ${allMessages.length})`);
                 
                 if (messages.size < 100) break;
+                
+                // Pausa per evitare rate limit
                 await new Promise(resolve => setTimeout(resolve, 1000));
                 
             } catch (error) {
-                console.error(`   ❌ Errore batch:`, error.message);
+                console.error(`   ❌ Errore batch ${batchCount}:`, error.message);
                 break;
             }
         }
         
+        // Inverti per clonare dal più vecchio
         allMessages.reverse();
         console.log(`✅ Totale messaggi: ${allMessages.length}`);
+        
         return allMessages;
         
     } catch (error) {
-        console.error(`❌ Errore fetch canale:`, error.message);
+        console.error(`❌ Errore fetch canale ${channelId}:`, error.message);
         return [];
     }
 }
 
 async function cloneChannel(sourceChannelId, targetWebhook) {
     try {
-        console.log(`\n🚀 INIZIO CLONAZIONE`);
+        console.log(`\n🚀 INIZIO CLONAZIONE CANALE`);
+        console.log(`🔗 Webhook target: ${targetWebhook.webhook.url}`);
         
         const messages = await fetchChannelMessages(sourceChannelId);
+        
         if (messages.length === 0) {
             console.log(`⚠️ Nessun messaggio da clonare`);
             return { success: 0, error: 0 };
@@ -182,9 +190,11 @@ async function cloneChannel(sourceChannelId, targetWebhook) {
         let successCount = 0;
         let errorCount = 0;
         
+        // Inizia clonazione
         for (let i = 0; i < messages.length; i++) {
             const message = messages[i];
             
+            // Salta messaggi di bot
             if (message.author.bot) continue;
             
             try {
@@ -196,48 +206,64 @@ async function cloneChannel(sourceChannelId, targetWebhook) {
                 
                 const files = [];
                 
-                // Allegati
+                // Processa allegati
                 if (message.attachments.size > 0) {
                     for (const attachment of message.attachments.values()) {
-                        if (attachment.size > 8000000) continue;
-                        
-                        const fileData = await downloadAttachment(attachment.url);
-                        if (fileData) {
-                            files.push({
-                                ...fileData,
-                                filename: attachment.name || `file_${Date.now()}.${fileData.ext}`
-                            });
+                        try {
+                            if (attachment.size > 8000000) { // 8MB limit
+                                console.log(`   ⚠️ File troppo grande: ${attachment.name}`);
+                                continue;
+                            }
+                            
+                            const fileData = await downloadAttachment(attachment.url);
+                            if (fileData) {
+                                files.push({
+                                    ...fileData,
+                                    filename: attachment.name || `file_${Date.now()}.${fileData.ext}`
+                                });
+                            }
+                        } catch (error) {
+                            console.log(`   ❌ Errore download allegato: ${error.message}`);
                         }
                     }
                 }
                 
-                // Embed
+                // Processa embed con immagini
                 if (message.embeds.length > 0) {
                     for (const embed of message.embeds) {
                         if (embed.image && embed.image.url) {
-                            const fileData = await downloadAttachment(embed.image.url);
-                            if (fileData) {
-                                files.push({
-                                    ...fileData,
-                                    filename: `embed_${Date.now()}.${fileData.ext}`
-                                });
+                            try {
+                                const fileData = await downloadAttachment(embed.image.url);
+                                if (fileData) {
+                                    files.push({
+                                        ...fileData,
+                                        filename: `embed_${Date.now()}.${fileData.ext}`
+                                    });
+                                }
+                            } catch (error) {
+                                console.log(`   ❌ Errore download embed: ${error.message}`);
                             }
                         }
                     }
                 }
                 
+                // Invia tramite webhook
                 await sendViaWebhook(targetWebhook.webhook.url, messageData, files);
                 successCount++;
                 
+                // Progresso ogni 10 messaggi
                 if (successCount % 10 === 0) {
-                    console.log(`   📊 Progresso: ${successCount}/${messages.length}`);
+                    console.log(`   📊 Progresso: ${successCount}/${messages.length} (${Math.round((successCount/messages.length)*100)}%)`);
                 }
                 
+                // Pausa breve per evitare rate limit
                 await new Promise(resolve => setTimeout(resolve, 300));
                 
             } catch (error) {
                 errorCount++;
                 console.log(`   ❌ Errore messaggio ${i + 1}: ${error.message}`);
+                
+                // Pausa più lunga in caso di errore
                 await new Promise(resolve => setTimeout(resolve, 1000));
             }
         }
@@ -248,21 +274,24 @@ async function cloneChannel(sourceChannelId, targetWebhook) {
         return { success: successCount, error: errorCount };
         
     } catch (error) {
-        console.error(`❌ Errore fatale:`, error);
+        console.error(`❌ Errore fatale clonazione:`, error);
         return { success: 0, error: 1 };
     }
 }
 
 async function startCloning() {
     if (isCloning) {
-        console.log('⚠️ Già in corso!');
+        console.log('⚠️ Clonazione già in corso!');
         return;
     }
     
     isCloning = true;
-    console.log('\n🚀 AVVIO CLONAZIONE AUTOMATICA\n');
+    console.log('\n' + '='.repeat(50));
+    console.log('🚀 AVVIO CLONAZIONE AUTOMATICA');
+    console.log('='.repeat(50) + '\n');
     
     try {
+        // Resetta
         createdChannels = [];
         createdWebhooks = [];
         
@@ -276,61 +305,73 @@ async function startCloning() {
         }
         
         console.log(`🏰 Server target: ${targetGuild.name}`);
+        console.log(`🎯 Canali da creare: ${CONFIG.CHANNEL_IDS.length}\n`);
         
-        // Crea canali e webhook
-        console.log('\n🎯 FASE 1: Creazione canali GRINDR');
+        // FASE 1: Crea canali e webhook
+        console.log('🎯 FASE 1: Creazione canali GRINDR\n');
         const webhookInfos = [];
         
         for (let i = 0; i < CONFIG.CHANNEL_IDS.length; i++) {
-            console.log(`\n🔨 Canale ${i + 1}/${CONFIG.CHANNEL_IDS.length}`);
+            console.log(`🔨 Creazione canale ${i + 1}/${CONFIG.CHANNEL_IDS.length}`);
             
             const webhookInfo = await createChannelAndWebhook(targetGuild, i);
             if (webhookInfo) {
                 webhookInfos.push(webhookInfo);
                 createdChannels.push(webhookInfo.channel);
                 createdWebhooks.push(webhookInfo.webhook);
+                console.log(`✅ Canale ${i + 1} creato\n`);
             }
             
+            // Pausa tra creazioni
             await new Promise(resolve => setTimeout(resolve, 800));
         }
         
-        console.log(`\n✅ ${webhookInfos.length} canali creati`);
+        console.log(`\n✨ ${webhookInfos.length} canali creati con successo!\n`);
         
-        // Clonazione in parallelo
-        console.log('\n🚀 FASE 2: Clonazione in parallelo');
+        // FASE 2: Clonazione in parallelo
+        console.log('🚀 FASE 2: Clonazione contenuti in parallelo\n');
+        
         const clonePromises = [];
         const results = [];
         
         for (let i = 0; i < CONFIG.CHANNEL_IDS.length && i < webhookInfos.length; i++) {
             const promise = (async (index) => {
-                console.log(`\n📁 Avvio clonazione canale ${index + 1}...`);
+                console.log(`📁 Inizio clonazione canale ${index + 1}...`);
                 const result = await cloneChannel(CONFIG.CHANNEL_IDS[index], webhookInfos[index]);
                 results.push({ index, result });
-                console.log(`✅ Canale ${index + 1} completato`);
+                console.log(`\n✅ Canale ${index + 1} clonato\n`);
             })(i);
             
             clonePromises.push(promise);
         }
         
+        // Attendi completamento
         await Promise.allSettled(clonePromises);
         
-        // Riepilogo
-        console.log('\n✨ TUTTO COMPLETATO!\n');
+        // FASE 3: Riepilogo
+        console.log('='.repeat(50));
+        console.log('✨ TUTTE LE CLONAZIONI COMPLETATE!');
+        console.log('='.repeat(50) + '\n');
         
         let totalSuccess = 0;
         let totalError = 0;
         
+        console.log('📊 RIEPILOGO FINALE:\n');
+        
         results.forEach((item, i) => {
-            console.log(`Canale ${i + 1}:`);
-            console.log(`   ✅ ${item.result.success} messaggi`);
+            console.log(`Canale ${i + 1} (#${createdChannels[i].name}):`);
+            console.log(`   ✅ ${item.result.success} messaggi clonati`);
             console.log(`   ❌ ${item.result.error} errori`);
-            console.log(`   🔗 ${createdWebhooks[i].url}`);
+            console.log(`   🔗 ${createdWebhooks[i].url}\n`);
             
             totalSuccess += item.result.success;
             totalError += item.result.error;
         });
         
-        console.log(`\n📊 TOTALE: ${totalSuccess} successi, ${totalError} errori`);
+        console.log('📈 TOTALE GENERALE:');
+        console.log(`   ✅ ${totalSuccess} successi`);
+        console.log(`   ❌ ${totalError} errori`);
+        console.log(`   🏁 ${createdChannels.length} canali\n`);
         
         // Salva webhook
         const webhookData = {
@@ -341,10 +382,11 @@ async function startCloning() {
         };
         
         fs.writeFileSync('webhooks_grindr.json', JSON.stringify(webhookData, null, 2));
-        console.log('\n💾 Webhook salvati in webhooks_grindr.json');
+        console.log('💾 Webhook salvati in webhooks_grindr.json\n');
+        console.log('🎉 PROCESSO COMPLETATO CON SUCCESSO!\n');
         
     } catch (error) {
-        console.error('❌ Errore:', error);
+        console.error('❌ Errore nel processo:', error);
     } finally {
         isCloning = false;
     }
@@ -368,7 +410,7 @@ client.on('ready', () => {
             startCloning();
         } else {
             console.log('❌ TARGET_GUILD_ID mancante!');
-            console.log('🔧 Configuralo in Render.com');
+            console.log('🔧 Configuralo nelle variabili d\'ambiente di Render');
         }
     }, 5000);
 });
@@ -389,7 +431,18 @@ process.stdin.on('data', (data) => {
         console.log(`   Webhook: ${createdWebhooks.length}`);
     }
     
-    if (input === 'exit') {
+    if (input === 'webhooks') {
+        if (createdWebhooks.length > 0) {
+            console.log('\n🔗 WEBHOOK CREATI:');
+            createdWebhooks.forEach((w, i) => {
+                console.log(`${i + 1}. ${w.url}`);
+            });
+        } else {
+            console.log('\n❌ Nessun webhook creato');
+        }
+    }
+    
+    if (input === 'exit' || input === 'quit') {
         console.log('\n👋 Uscita...');
         client.destroy();
         process.exit(0);
@@ -404,7 +457,7 @@ client.login(CONFIG.USER_TOKEN).catch(error => {
     console.error('❌ Login fallito:', error.message);
     console.log('\n🔧 Possibili cause:');
     console.log('1. Token invalido o scaduto');
-    console.log('2. Account bannato');
+    console.log('2. Account bannato o sospeso');
     console.log('3. 2FA attivo');
     console.log('4. Token revocato');
     process.exit(1);
