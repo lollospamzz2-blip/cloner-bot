@@ -5,11 +5,23 @@
 .env.test.local
 .env.production.local
 
+# File sensibili Discord
+webhooks_grindr.json
+webhooks.json
+token.txt
+tokens.txt
+*.session
+*.session-*
+discord_token.txt
+auth.json
+
 # Dependencies
 node_modules/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+package-lock.json
+yarn.lock
 
 # Runtime data
 pids
@@ -21,21 +33,53 @@ pids
 coverage/
 
 # Logs
-logs
+logs/
 *.log
-
-# Misc
-.DS_Store
-*.pem
-*.session
-*.db
-*.sqlite
-
-# Discord tokens
-token.txt
-config.json
 
 # Temporary files
 temp/
-uploads/
+tmp/
+downloads/
+cache/
 *.tmp
+*.temp
+
+# Downloaded media (temporanei)
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.mp4
+*.webm
+*.mov
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# System files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# OS generated files
+*.orig
+
+# Optional REPL history
+.node_repl_history
+
+# Backup files
+*.bak
+*.backup
+
+# Output di build
+dist/
+build/
+out/
