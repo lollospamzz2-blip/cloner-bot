@@ -505,18 +505,22 @@ async function startCloning() {
 }
 
 client.on('ready', () => {
-    console.log('='.repeat(70));
-    console.log(`✅ ACCOUNT READY: ${client.user.tag}`);
-    console.log('='.repeat(70));
-    console.log(`🆔 ID: ${client.user.id}`);
-    console.log(`🏰 Servers: ${client.guilds.cache.size}`);
-    console.log('='.repeat(70));
-    
-    console.log('\n⏱️ Starting in 2 seconds...\n');
-    
-    setTimeout(() => {
-        startCloning();
-    }, 2000);
+    try {
+        console.log('='.repeat(70));
+        console.log(`✅ ACCOUNT READY: ${client.user.tag}`);
+        console.log('='.repeat(70));
+        console.log(`🆔 ID: ${client.user.id}`);
+        console.log(`🏰 Servers: ${client.guilds.cache.size}`);
+        console.log('='.repeat(70));
+        
+        console.log('\n⏱️ Starting in 2 seconds...\n');
+        
+        setTimeout(() => {
+            startCloning();
+        }, 2000);
+    } catch (error) {
+        console.error('❌ Ready event error:', error.message);
+    }
 });
 
 client.on('error', error => {
