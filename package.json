@@ -1,26 +1,22 @@
 {
   "name": "discord-grindr-cloner",
   "version": "1.0.0",
-  "description": "Clone Discord channels to GRINDR webhooks",
+  "description": "Clone Discord channels using user account",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
     "dev": "nodemon index.js"
   },
   "dependencies": {
-    "discord.js": "^14.14.1",
+    "discord.js-selfbot": "^13.16.0",
     "axios": "^1.6.0",
     "dotenv": "^16.3.1",
     "form-data": "^4.0.0"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": "16.x"
   },
-  "keywords": [
-    "discord",
-    "cloner",
-    "webhook"
-  ],
+  "keywords": [],
   "author": "",
-  "license": "MIT"
+  "license": "ISC"
 }
