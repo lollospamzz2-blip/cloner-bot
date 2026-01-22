@@ -2,92 +2,177 @@ const { Client } = require('discord.js-selfbot-v13');
 const axios = require('axios');
 const FormData = require('form-data');
 const fs = require('fs');
-require('dotenv').config();
+const http = require('http');
 
-// Configurazione
-const CONFIG = {
-    USER_TOKEN: process.env.USER_TOKEN,
-    SOURCE_GUILD_ID: process.env.SOURCE_GUILD_ID || '1430987988606779455',
-    CHANNEL_IDS: process.env.CHANNEL_IDS ? 
-        process.env.CHANNEL_IDS.split(',') : [
-            '1431350770460004373',
-            '1431350918267404501',
-            '1431350851259072714'
-        ],
-    WEBHOOK_NAME: process.env.WEBHOOK_NAME || 'GRINDR',
-    TARGET_GUILD_ID: process.env.TARGET_GUILD_ID
-};
+// Environment variables - SOLO 2 RICHIESTE
+const USER_TOKEN = process.env.USER_TOKEN;
+const TARGET_GUILD_ID = process.env.TARGET_GUILD_ID;
 
-// Verifica token utente
-if (!CONFIG.USER_TOKEN) {
-    console.error('❌ ERRORE: USER_TOKEN mancante!');
-    console.log('\n🔧 Per ottenere il token utente:');
-    console.log('1. Accedi a Discord Web');
-    console.log('2. Premi F12 → Application → Local Storage');
-    console.log('3. Cerca "token" e copia il valore');
-    console.log('⚠️ AVVISO: Usare token utente VIOLA i ToS di Discord!');
+// Default values - Auto-detect
+const PORT = process.env.PORT || 3000;
+const WEBHOOK_NAME = 'GRINDR';
+const RATE_LIMIT_MS = 300;
+const MAX_CONCURRENT = 3;
+
+// Validation
+if (!USER_TOKEN || !TARGET_GUILD_ID) {
+    console.error('❌ CONFIGURAZIONE INCOMPLETA!');
+    console.error('Su Render aggiungi solo 2 variabili:');
+    console.error('  USER_TOKEN = il tuo token Discord');
+    console.error('  TARGET_GUILD_ID = ID del server target');
     process.exit(1);
 }
 
-// Crea client selfbot
-const client = new Client({
-    checkUpdate: false
+// Keep-alive server per Render
+const server = http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('Discord Selfbot Running');
 });
 
-// Stato
+server.listen(PORT, () => {
+    console.log(`✅ Keep-alive server on port ${PORT}`);
+});
+
+const client = new Client({ checkUpdate: false });
+
 let isCloning = false;
 let createdChannels = [];
 let createdWebhooks = [];
+let detectedChannels = [];
+let globalStats = { totalSuccess: 0, totalError: 0, totalVideos: 0 };
 
-async function createChannelAndWebhook(guild, index) {
+// Upload Queue per parallelize
+class UploadQueue {
+    constructor(maxConcurrent) {
+        this.maxConcurrent = maxConcurrent;
+        this.queue = [];
+        this.running = 0;
+    }
+
+    async add(task) {
+        return new Promise((resolve) => {
+            this.queue.push({ task, resolve });
+            this.process();
+        });
+    }
+
+    async process() {
+        while (this.running < this.maxConcurrent && this.queue.length > 0) {
+            this.running++;
+            const { task, resolve } = this.queue.shift();
+            try {
+                const result = await task();
+                resolve(result);
+            } catch (error) {
+                resolve({ error: error.message });
+            } finally {
+                this.running--;
+                this.process();
+            }
+        }
+    }
+}
+
+const uploadQueue = new UploadQueue(MAX_CONCURRENT);
+
+async function detectSourceChannels() {
     try {
-        const channelName = `${CONFIG.WEBHOOK_NAME}-${index + 1}`;
+        console.log('\n🔍 Rilevamento canali sorgente...\n');
+        
+        const userGuilds = client.guilds.cache;
+        if (userGuilds.size === 0) {
+            console.error('❌ Non sei in nessun server!');
+            return [];
+        }
+        
+        for (const [guildId, guild] of userGuilds) {
+            if (guildId !== TARGET_GUILD_ID) {
+                const textChannels = guild.channels.cache.filter(ch => ch.type === 'GUILD_TEXT');
+                
+                if (textChannels.size > 0) {
+                    console.log(`📍 Server trovato: ${guild.name}`);
+                    
+                    textChannels.forEach((ch, idx) => {
+                        console.log(`   ${idx + 1}. #${ch.name} (${ch.id})`);
+                        detectedChannels.push({
+                            id: ch.id,
+                            name: ch.name,
+                            guild: guild.name
+                        });
+                    });
+                    console.log();
+                    
+                    if (detectedChannels.length > 0) {
+                        break;
+                    }
+                }
+            }
+        }
+        
+        if (detectedChannels.length === 0) {
+            console.error('❌ Nessun canale trovato negli altri server!');
+            return [];
+        }
+        
+        console.log(`✅ Trovati ${detectedChannels.length} canali\n`);
+        return detectedChannels.map(ch => ch.id);
+        
+    } catch (error) {
+        console.error(`❌ Errore rilevamento: ${error.message}`);
+        return [];
+    }
+}
+
+async function createChannelAndWebhook(guild, index, sourceName) {
+    try {
+        const channelName = `${WEBHOOK_NAME}-${index + 1}`;
         console.log(`📁 Creando canale: ${channelName}...`);
         
         const channel = await guild.channels.create(channelName, {
-            type: 'text',
-            topic: `Clonato da canale #${index + 1}`,
+            type: 'GUILD_TEXT',
+            topic: `Clonato da: ${sourceName}`,
             nsfw: true
         });
         
-        console.log(`🔧 Creando webhook in #${channel.name}...`);
-        const webhook = await channel.createWebhook(CONFIG.WEBHOOK_NAME, {
-            avatar: null
-        });
+        console.log(`🔧 Creando webhook...`);
+        const webhook = await channel.createWebhook(WEBHOOK_NAME, { avatar: null });
         
-        console.log(`✅ Canale #${channel.name} creato con webhook`);
+        console.log(`✅ Canale #${channel.name} creato\n`);
         return { channel, webhook };
         
     } catch (error) {
-        console.error(`❌ Errore creazione canale ${index + 1}:`, error.message);
+        console.error(`❌ Errore creazione canale ${index + 1}: ${error.message}`);
         return null;
     }
 }
 
-async function downloadAttachment(url) {
+async function downloadFile(url, maxSize = 8388608) {
     try {
         const response = await axios.get(url, {
             responseType: 'arraybuffer',
-            headers: {
-                'User-Agent': 'Mozilla/5.0'
-            }
+            timeout: 45000,
+            headers: { 'User-Agent': 'Mozilla/5.0' },
+            maxContentLength: maxSize,
+            maxBodyLength: maxSize
         });
         
-        const contentType = response.headers['content-type'] || 'image/jpeg';
-        let ext = 'jpg';
+        const contentType = response.headers['content-type'] || 'video/mp4';
+        let ext = 'mp4';
         
         if (contentType.includes('png')) ext = 'png';
+        else if (contentType.includes('jpg') || contentType.includes('jpeg')) ext = 'jpg';
         else if (contentType.includes('gif')) ext = 'gif';
-        else if (contentType.includes('mp4')) ext = 'mp4';
+        else if (contentType.includes('webp')) ext = 'webp';
+        else if (contentType.includes('video') || contentType.includes('mp4')) ext = 'mp4';
         else if (contentType.includes('webm')) ext = 'webm';
         
         return {
             buffer: Buffer.from(response.data),
             contentType: contentType,
-            ext: ext
+            ext: ext,
+            size: response.data.length
         };
     } catch (error) {
-        console.error('❌ Errore download:', error.message);
         return null;
     }
 }
@@ -96,31 +181,35 @@ async function sendViaWebhook(webhookUrl, messageData, files = []) {
     try {
         const formData = new FormData();
         
-        if (messageData.content) {
-            formData.append('content', messageData.content);
+        if (messageData.content && messageData.content.trim()) {
+            formData.append('content', messageData.content.substring(0, 2000));
         }
         
-        for (let i = 0; i < files.length; i++) {
-            const file = files[i];
-            formData.append(`files[${i}]`, file.buffer, {
-                filename: file.filename || `file_${Date.now()}.${file.ext}`,
-                contentType: file.contentType
-            });
+        if (files.length > 0) {
+            for (let i = 0; i < Math.min(files.length, 10); i++) {
+                const file = files[i];
+                formData.append(`files[${i}]`, file.buffer, {
+                    filename: file.filename || `file_${i}.${file.ext}`,
+                    contentType: file.contentType
+                });
+            }
         }
         
-        formData.append('username', messageData.username || CONFIG.WEBHOOK_NAME);
+        formData.append('username', WEBHOOK_NAME);
         if (messageData.avatar_url) {
             formData.append('avatar_url', messageData.avatar_url);
         }
         
-        const response = await axios.post(webhookUrl, formData, {
-            headers: formData.getHeaders()
+        await axios.post(webhookUrl, formData, {
+            headers: formData.getHeaders(),
+            timeout: 60000,
+            maxBodyLength: 8388608,
+            maxContentLength: 8388608
         });
         
-        return response.data;
+        return true;
     } catch (error) {
-        console.error('❌ Errore invio webhook:', error.message);
-        return null;
+        return false;
     }
 }
 
@@ -145,320 +234,302 @@ async function fetchChannelMessages(channelId) {
                 const messages = await channel.messages.fetch(options);
                 if (messages.size === 0) break;
                 
-                const messagesArray = Array.from(messages.values());
-                allMessages = allMessages.concat(messagesArray);
-                lastId = messages.last().id;
+                allMessages = allMessages.concat(Array.from(messages.values()));
+                
+                if (messages.last()) lastId = messages.last().id;
                 
                 batchCount++;
-                console.log(`   Batch ${batchCount}: ${messages.size} messaggi (totale: ${allMessages.length})`);
+                console.log(`   Batch ${batchCount}: ${messages.size} msg (total: ${allMessages.length})`);
                 
                 if (messages.size < 100) break;
                 
-                // Pausa per evitare rate limit
-                await new Promise(resolve => setTimeout(resolve, 1000));
+                await new Promise(resolve => setTimeout(resolve, 800));
                 
             } catch (error) {
-                console.error(`   ❌ Errore batch ${batchCount}:`, error.message);
+                console.error(`   ❌ Batch error ${batchCount}: ${error.message}`);
                 break;
             }
         }
         
-        // Inverti per clonare dal più vecchio
         allMessages.reverse();
-        console.log(`✅ Totale messaggi: ${allMessages.length}`);
-        
+        console.log(`✅ Total: ${allMessages.length} messaggi\n`);
         return allMessages;
         
     } catch (error) {
-        console.error(`❌ Errore fetch canale ${channelId}:`, error.message);
+        console.error(`❌ Fetch error: ${error.message}`);
         return [];
     }
 }
 
-async function cloneChannel(sourceChannelId, targetWebhook) {
+async function cloneChannel(sourceChannelId, targetWebhook, channelIndex) {
     try {
-        console.log(`\n🚀 INIZIO CLONAZIONE CANALE`);
-        console.log(`🔗 Webhook target: ${targetWebhook.webhook.url}`);
+        console.log(`\n🚀 CLONING CANALE ${channelIndex + 1}`);
         
         const messages = await fetchChannelMessages(sourceChannelId);
         
         if (messages.length === 0) {
-            console.log(`⚠️ Nessun messaggio da clonare`);
-            return { success: 0, error: 0 };
+            console.log(`⚠️ Nessun messaggio`);
+            return { success: 0, error: 0, videos: 0 };
         }
         
-        let successCount = 0;
-        let errorCount = 0;
+        let videoCount = 0;
+        const uploadTasks = [];
         
-        // Inizia clonazione
         for (let i = 0; i < messages.length; i++) {
             const message = messages[i];
-            
-            // Salta messaggi di bot
             if (message.author.bot) continue;
             
-            try {
-                const messageData = {
-                    content: message.content || '',
-                    username: message.author.username,
-                    avatar_url: message.author.displayAvatarURL({ format: 'png' })
-                };
-                
-                const files = [];
-                
-                // Processa allegati
-                if (message.attachments.size > 0) {
-                    for (const attachment of message.attachments.values()) {
-                        try {
-                            if (attachment.size > 8000000) { // 8MB limit
-                                console.log(`   ⚠️ File troppo grande: ${attachment.name}`);
-                                continue;
+            uploadTasks.push(
+                uploadQueue.add(async () => {
+                    try {
+                        const messageData = {
+                            content: message.content || '',
+                            username: WEBHOOK_NAME,
+                            avatar_url: message.author.displayAvatarURL({ format: 'png', size: 256 })
+                        };
+                        
+                        const files = [];
+                        let hasVideo = false;
+                        
+                        if (message.attachments && message.attachments.size > 0) {
+                            for (const attachment of message.attachments.values()) {
+                                try {
+                                    if (attachment.size > 8388608) continue;
+                                    
+                                    const fileData = await downloadFile(attachment.url);
+                                    if (fileData) {
+                                        if (fileData.ext === 'mp4' || fileData.ext === 'webm') {
+                                            hasVideo = true;
+                                        }
+                                        files.push({
+                                            ...fileData,
+                                            filename: attachment.name || `file_${Date.now()}.${fileData.ext}`
+                                        });
+                                    }
+                                } catch (error) { /* */ }
                             }
-                            
-                            const fileData = await downloadAttachment(attachment.url);
-                            if (fileData) {
-                                files.push({
-                                    ...fileData,
-                                    filename: attachment.name || `file_${Date.now()}.${fileData.ext}`
-                                });
-                            }
-                        } catch (error) {
-                            console.log(`   ❌ Errore download allegato: ${error.message}`);
                         }
-                    }
-                }
-                
-                // Processa embed con immagini
-                if (message.embeds.length > 0) {
-                    for (const embed of message.embeds) {
-                        if (embed.image && embed.image.url) {
-                            try {
-                                const fileData = await downloadAttachment(embed.image.url);
-                                if (fileData) {
-                                    files.push({
-                                        ...fileData,
-                                        filename: `embed_${Date.now()}.${fileData.ext}`
-                                    });
+                        
+                        if (message.embeds && message.embeds.length > 0) {
+                            for (const embed of message.embeds) {
+                                if (embed.image && embed.image.url && files.length < 10) {
+                                    try {
+                                        const fileData = await downloadFile(embed.image.url);
+                                        if (fileData) files.push({ ...fileData, filename: `embed_${Date.now()}.${fileData.ext}` });
+                                    } catch (error) { /* */ }
                                 }
-                            } catch (error) {
-                                console.log(`   ❌ Errore download embed: ${error.message}`);
+                                
+                                if (embed.video && embed.video.url && files.length < 10) {
+                                    try {
+                                        const fileData = await downloadFile(embed.video.url);
+                                        if (fileData) {
+                                            hasVideo = true;
+                                            files.push({ ...fileData, filename: `video_${Date.now()}.${fileData.ext}` });
+                                        }
+                                    } catch (error) { /* */ }
+                                }
                             }
                         }
+                        
+                        const success = await sendViaWebhook(targetWebhook.webhook.url, messageData, files);
+                        
+                        if (success) {
+                            globalStats.totalSuccess++;
+                            if (hasVideo) {
+                                videoCount++;
+                                globalStats.totalVideos++;
+                            }
+                        } else {
+                            globalStats.totalError++;
+                        }
+                        
+                        return { success };
+                        
+                    } catch (error) {
+                        globalStats.totalError++;
+                        return { success: false };
                     }
-                }
-                
-                // Invia tramite webhook
-                await sendViaWebhook(targetWebhook.webhook.url, messageData, files);
-                successCount++;
-                
-                // Progresso ogni 10 messaggi
-                if (successCount % 10 === 0) {
-                    console.log(`   📊 Progresso: ${successCount}/${messages.length} (${Math.round((successCount/messages.length)*100)}%)`);
-                }
-                
-                // Pausa breve per evitare rate limit
-                await new Promise(resolve => setTimeout(resolve, 300));
-                
-            } catch (error) {
-                errorCount++;
-                console.log(`   ❌ Errore messaggio ${i + 1}: ${error.message}`);
-                
-                // Pausa più lunga in caso di errore
-                await new Promise(resolve => setTimeout(resolve, 1000));
-            }
+                })
+            );
         }
         
-        console.log(`\n✅ CLONAZIONE COMPLETATA!`);
-        console.log(`   Successo: ${successCount}, Errori: ${errorCount}`);
+        const results = await Promise.allSettled(uploadTasks);
+        const successCount = results.filter(r => r.status === 'fulfilled' && r.value.success).length;
+        const errorCount = results.filter(r => r.status === 'rejected' || !r.value.success).length;
         
-        return { success: successCount, error: errorCount };
+        console.log(`✅ CANALE ${channelIndex + 1} DONE!`);
+        console.log(`   ✅ ${successCount} messaggi`);
+        console.log(`   🎬 ${videoCount} video`);
+        console.log(`   ❌ ${errorCount} errori\n`);
+        
+        return { success: successCount, error: errorCount, videos: videoCount };
         
     } catch (error) {
-        console.error(`❌ Errore fatale clonazione:`, error);
-        return { success: 0, error: 1 };
+        console.error(`❌ Clone error: ${error.message}`);
+        return { success: 0, error: 1, videos: 0 };
     }
 }
 
 async function startCloning() {
     if (isCloning) {
-        console.log('⚠️ Clonazione già in corso!');
+        console.log('⚠️ Già in corso!');
         return;
     }
     
     isCloning = true;
-    console.log('\n' + '='.repeat(50));
+    globalStats = { totalSuccess: 0, totalError: 0, totalVideos: 0 };
+    
+    console.log('\n' + '='.repeat(70));
     console.log('🚀 AVVIO CLONAZIONE AUTOMATICA');
-    console.log('='.repeat(50) + '\n');
+    console.log('='.repeat(70));
     
     try {
-        // Resetta
         createdChannels = [];
         createdWebhooks = [];
         
-        // Verifica server target
-        const targetGuild = client.guilds.cache.get(CONFIG.TARGET_GUILD_ID);
+        const targetGuild = client.guilds.cache.get(TARGET_GUILD_ID);
         if (!targetGuild) {
             console.error('❌ Non sei nel server target!');
-            console.log(`🔧 Entra nel server con ID: ${CONFIG.TARGET_GUILD_ID}`);
             isCloning = false;
             return;
         }
         
-        console.log(`🏰 Server target: ${targetGuild.name}`);
-        console.log(`🎯 Canali da creare: ${CONFIG.CHANNEL_IDS.length}\n`);
+        console.log(`\n🏰 Server target: ${targetGuild.name}`);
+        console.log(`⚡ Upload paralleli: ${MAX_CONCURRENT}x\n`);
         
-        // FASE 1: Crea canali e webhook
-        console.log('🎯 FASE 1: Creazione canali GRINDR\n');
+        // Auto-detect source channels
+        const sourceChannelIds = await detectSourceChannels();
+        
+        if (sourceChannelIds.length === 0) {
+            console.error('❌ Nessun canale da clonare!');
+            isCloning = false;
+            return;
+        }
+        
+        // FASE 1: Create channels
+        console.log('🎯 FASE 1: Creazione canali\n');
         const webhookInfos = [];
         
-        for (let i = 0; i < CONFIG.CHANNEL_IDS.length; i++) {
-            console.log(`🔨 Creazione canale ${i + 1}/${CONFIG.CHANNEL_IDS.length}`);
-            
-            const webhookInfo = await createChannelAndWebhook(targetGuild, i);
+        for (let i = 0; i < sourceChannelIds.length; i++) {
+            const sourceName = detectedChannels[i]?.name || `Channel ${i + 1}`;
+            const webhookInfo = await createChannelAndWebhook(targetGuild, i, sourceName);
             if (webhookInfo) {
                 webhookInfos.push(webhookInfo);
                 createdChannels.push(webhookInfo.channel);
                 createdWebhooks.push(webhookInfo.webhook);
-                console.log(`✅ Canale ${i + 1} creato\n`);
             }
-            
-            // Pausa tra creazioni
-            await new Promise(resolve => setTimeout(resolve, 800));
+            await new Promise(resolve => setTimeout(resolve, 500));
         }
         
-        console.log(`\n✨ ${webhookInfos.length} canali creati con successo!\n`);
+        if (webhookInfos.length === 0) {
+            console.error('❌ Nessun canale creato!');
+            isCloning = false;
+            return;
+        }
         
-        // FASE 2: Clonazione in parallelo
-        console.log('🚀 FASE 2: Clonazione contenuti in parallelo\n');
+        console.log(`✨ ${webhookInfos.length} canali creati!\n`);
+        
+        // FASE 2: Clone PARALLEL
+        console.log('⚡ FASE 2: Clonazione PARALLELA\n');
         
         const clonePromises = [];
-        const results = [];
-        
-        for (let i = 0; i < CONFIG.CHANNEL_IDS.length && i < webhookInfos.length; i++) {
-            const promise = (async (index) => {
-                console.log(`📁 Inizio clonazione canale ${index + 1}...`);
-                const result = await cloneChannel(CONFIG.CHANNEL_IDS[index], webhookInfos[index]);
-                results.push({ index, result });
-                console.log(`\n✅ Canale ${index + 1} clonato\n`);
-            })(i);
-            
-            clonePromises.push(promise);
+        for (let i = 0; i < sourceChannelIds.length && i < webhookInfos.length; i++) {
+            clonePromises.push(cloneChannel(sourceChannelIds[i], webhookInfos[i], i));
         }
         
-        // Attendi completamento
-        await Promise.allSettled(clonePromises);
+        const results = await Promise.allSettled(clonePromises);
         
-        // FASE 3: Riepilogo
-        console.log('='.repeat(50));
-        console.log('✨ TUTTE LE CLONAZIONI COMPLETATE!');
-        console.log('='.repeat(50) + '\n');
-        
-        let totalSuccess = 0;
-        let totalError = 0;
+        // FASE 3: Summary
+        console.log('\n' + '='.repeat(70));
+        console.log('✨ CLONAZIONE COMPLETATA!');
+        console.log('='.repeat(70) + '\n');
         
         console.log('📊 RIEPILOGO FINALE:\n');
         
-        results.forEach((item, i) => {
-            console.log(`Canale ${i + 1} (#${createdChannels[i].name}):`);
-            console.log(`   ✅ ${item.result.success} messaggi clonati`);
-            console.log(`   ❌ ${item.result.error} errori`);
-            console.log(`   🔗 ${createdWebhooks[i].url}\n`);
-            
-            totalSuccess += item.result.success;
-            totalError += item.result.error;
+        results.forEach((result, i) => {
+            const data = result.status === 'fulfilled' ? result.value : { success: 0, error: 1, videos: 0 };
+            const channelName = createdChannels[i]?.name || 'N/A';
+            console.log(`Canale ${i + 1} (#${channelName}):`);
+            console.log(`   ✅ ${data.success} messaggi`);
+            console.log(`   🎬 ${data.videos} video`);
+            console.log(`   ❌ ${data.error} errori`);
+            if (createdWebhooks[i]) {
+                console.log(`   🔗 ${createdWebhooks[i].url}\n`);
+            }
         });
         
-        console.log('📈 TOTALE GENERALE:');
-        console.log(`   ✅ ${totalSuccess} successi`);
-        console.log(`   ❌ ${totalError} errori`);
+        console.log('📈 TOTALE:\n');
+        console.log(`   ✅ ${globalStats.totalSuccess} messaggi clonati`);
+        console.log(`   🎬 ${globalStats.totalVideos} video`);
+        console.log(`   ❌ ${globalStats.totalError} errori`);
         console.log(`   🏁 ${createdChannels.length} canali\n`);
         
-        // Salva webhook
+        // Save webhooks
         const webhookData = {
             timestamp: new Date().toISOString(),
-            webhooks: createdWebhooks.map(w => w.url),
-            channels: createdChannels.map(c => ({ name: c.name, id: c.id })),
-            stats: { success: totalSuccess, error: totalError }
+            server: targetGuild.name,
+            serverId: targetGuild.id,
+            webhookName: WEBHOOK_NAME,
+            webhooks: createdWebhooks.map(w => ({
+                url: w.url,
+                id: w.id,
+                channelId: w.channel?.id,
+                channelName: w.channel?.name
+            })),
+            stats: { 
+                totalSuccess: globalStats.totalSuccess, 
+                totalError: globalStats.totalError,
+                totalVideos: globalStats.totalVideos,
+                totalChannels: createdChannels.length
+            }
         };
         
-        fs.writeFileSync('webhooks_grindr.json', JSON.stringify(webhookData, null, 2));
-        console.log('💾 Webhook salvati in webhooks_grindr.json\n');
-        console.log('🎉 PROCESSO COMPLETATO CON SUCCESSO!\n');
+        fs.writeFileSync('webhooks_cloned.json', JSON.stringify(webhookData, null, 2));
+        console.log('💾 Dati salvati in webhooks_cloned.json\n');
+        console.log('🎉 FATTO!\n');
         
     } catch (error) {
-        console.error('❌ Errore nel processo:', error);
+        console.error('❌ Errore:', error.message);
     } finally {
         isCloning = false;
     }
 }
 
-// Quando il client è pronto
 client.on('ready', () => {
-    console.log('='.repeat(50));
-    console.log(`✅ ACCOUNT PRONTO: ${client.user.tag}`);
-    console.log('='.repeat(50));
-    console.log(`🆔 User ID: ${client.user.id}`);
-    console.log(`🏰 Server: ${client.guilds.cache.size}`);
-    console.log(`🎯 Canali da clonare: ${CONFIG.CHANNEL_IDS.length}`);
-    console.log(`🔧 Target Server: ${CONFIG.TARGET_GUILD_ID || 'Non configurato'}`);
-    console.log('='.repeat(50) + '\n');
+    console.log('='.repeat(70));
+    console.log(`✅ ACCOUNT READY: ${client.user.tag}`);
+    console.log('='.repeat(70));
+    console.log(`🆔 ID: ${client.user.id}`);
+    console.log(`🏰 Servers: ${client.guilds.cache.size}`);
+    console.log('='.repeat(70));
     
-    console.log('⏱️ Avvio automatico in 5 secondi...\n');
+    console.log('\n⏱️ Starting in 2 seconds...\n');
     
     setTimeout(() => {
-        if (CONFIG.TARGET_GUILD_ID) {
-            startCloning();
-        } else {
-            console.log('❌ TARGET_GUILD_ID mancante!');
-            console.log('🔧 Configuralo nelle variabili d\'ambiente di Render');
-        }
-    }, 5000);
-});
-
-// Comandi da console
-process.stdin.on('data', (data) => {
-    const input = data.toString().trim().toLowerCase();
-    
-    if (input === 'start') {
-        console.log('\n🚀 Comando start ricevuto');
         startCloning();
-    }
-    
-    if (input === 'status') {
-        console.log('\n📊 STATO:');
-        console.log(`   Clonazione: ${isCloning ? 'Attiva' : 'Inattiva'}`);
-        console.log(`   Canali: ${createdChannels.length}`);
-        console.log(`   Webhook: ${createdWebhooks.length}`);
-    }
-    
-    if (input === 'webhooks') {
-        if (createdWebhooks.length > 0) {
-            console.log('\n🔗 WEBHOOK CREATI:');
-            createdWebhooks.forEach((w, i) => {
-                console.log(`${i + 1}. ${w.url}`);
-            });
-        } else {
-            console.log('\n❌ Nessun webhook creato');
-        }
-    }
-    
-    if (input === 'exit' || input === 'quit') {
-        console.log('\n👋 Uscita...');
-        client.destroy();
-        process.exit(0);
-    }
+    }, 2000);
 });
 
-// Login
-console.log('🔐 Login con account utente...');
-console.log('⚠️ AVVISO: Selfbot viola i ToS di Discord!\n');
+client.on('error', error => {
+    console.error('❌ Client error:', error.message);
+});
 
-client.login(CONFIG.USER_TOKEN).catch(error => {
-    console.error('❌ Login fallito:', error.message);
-    console.log('\n🔧 Possibili cause:');
-    console.log('1. Token invalido o scaduto');
-    console.log('2. Account bannato o sospeso');
-    console.log('3. 2FA attivo');
-    console.log('4. Token revocato');
+// Process handlers
+process.on('SIGINT', () => {
+    console.log('\n👋 Closing...');
+    client.destroy();
+    process.exit(0);
+});
+
+process.on('SIGTERM', () => {
+    console.log('\n👋 Closing...');
+    client.destroy();
+    process.exit(0);
+});
+
+console.log('🔐 Login...\n');
+
+client.login(USER_TOKEN).catch(error => {
+    console.error('❌ Login failed:', error.message);
     process.exit(1);
 });
