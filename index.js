@@ -1,14 +1,19 @@
+require('dotenv').config();
+
 const { Client, GatewayIntentBits, ChannelType } = require('discord.js');
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
-require('dotenv').config();
 
 const TOKEN = process.env.USER_TOKEN;
 
+console.log('🔍 DEBUG: USER_TOKEN presente?', !!TOKEN);
+console.log('🔍 DEBUG: Token length:', TOKEN ? TOKEN.length : 'N/A');
+console.log('🔍 DEBUG: Variabili disponibili:', Object.keys(process.env).filter(k => k.includes('USER') || k.includes('TOKEN')));
+
 if (!TOKEN) {
   console.error('❌ Errore: USER_TOKEN non configurato!');
-  console.error('Aggiungi USER_TOKEN nelle variabili d\'ambiente');
+  console.error('❌ Aggiungi USER_TOKEN nelle variabili d\'ambiente di Render');
   process.exit(1);
 }
 
